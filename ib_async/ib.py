@@ -5,10 +5,10 @@ import copy
 import datetime
 import logging
 import time
-from typing import Any, Awaitable, Dict, Iterator, List, Optional, Union
+from enum import Flag, auto
+from typing import Any, Awaitable, Iterator, List, Optional, Union
 
 from eventkit import Event
-from enum import Flag, auto
 
 import ib_async.util as util
 from ib_async.client import Client
@@ -651,7 +651,12 @@ class IB:
         return list(self.wrapper.msgId2NewsBulletin.values())
 
     def reqTickers(
-        self, *contracts: Contract, regulatorySnapshot: bool = False
+        self,
+        *contracts: Contract,
+        genericTickList: str = "",
+        snapshot: bool = True,
+        regulatorySnapshot: bool = False,
+        mktDataOptions: List[TagValue] = [],
     ) -> List[Ticker]:
         """
         Request and return a list of snapshot tickers.
@@ -661,10 +666,19 @@ class IB:
 
         Args:
             contracts: Contracts to get tickers for.
+            genericTickList: Comma separated IDs of desired generic ticks.
+                See :meth:`.reqTickersAsync` for details.
             regulatorySnapshot: Request NBBO snapshots (may incur a fee).
+            mktDataOptions: Additional market data options.
         """
         return self._run(
-            self.reqTickersAsync(*contracts, regulatorySnapshot=regulatorySnapshot)
+            self.reqTickersAsync(
+                *contracts,
+                genericTickList=genericTickList,
+                snapshot=snapshot,
+                regulatorySnapshot=regulatorySnapshot,
+                mktDataOptions=mktDataOptions,
+            )
         )
 
     def qualifyContracts(self, *contracts: Contract) -> List[Contract]:
@@ -2109,24 +2123,91 @@ class IB:
         return result
 
     async def reqTickersAsync(
-        self, *contracts: Contract, regulatorySnapshot: bool = False
+        self,
+        *contracts: Contract,
+        genericTickList: str = "",
+        snapshot: bool = True,
+        regulatorySnapshot: bool = False,
+        mktDataOptions: List[TagValue] = [],
     ) -> List[Ticker]:
+        """
+        Request and return a list of snapshot tickers.
+        The list is returned when all tickers are ready.
+
+        Args:
+            contracts: Contracts to get tickers for.
+            genericTickList: Comma separated IDs of desired generic ticks:
+                =====  ================================================
+                ID     Ticker fields
+                =====  ================================================
+                100    ``putVolume``, ``callVolume`` (for options)
+                101    ``putOpenInterest``, ``callOpenInterest`` (for options)
+                104    ``histVolatility`` (for options)
+                105    ``avOptionVolume`` (for options)
+                106    ``impliedVolatility`` (for options)
+                162    ``indexFuturePremium``
+                165    ``low13week``, ``high13week``, ``low26week``,
+                       ``high26week``, ``low52week``, ``high52week``,
+                       ``avVolume``
+                221    ``markPrice``
+                225    ``auctionVolume``, ``auctionPrice``,
+                       ``auctionImbalance``
+                233    ``last``, ``lastSize``, ``rtVolume``, ``rtTime``,
+                       ``vwap`` (Time & Sales)
+                236    ``shortableShares``
+                258    ``fundamentalRatios``
+                293    ``tradeCount``
+                294    ``tradeRate``
+                295    ``volumeRate``
+                375    ``rtTradeVolume``
+                411    ``rtHistVolatility``
+                456    ``dividends``
+                588    ``futuresOpenInterest``
+                =====  ================================================
+            regulatorySnapshot: Request NBBO snapshots (may incur a fee).
+            mktDataOptions: Additional market data options.
+        """
+        if genericTickList and snapshot:
+            raise ValueError(
+                "Snapshot market data subscription is not applicable to generic ticks"
+            )
+        if not genericTickList and not snapshot:
+            raise ValueError(
+                "Either genericTickList must be provided or snapshot must be True"
+            )
         futures = []
         tickers = []
         reqIds = []
         for contract in contracts:
             reqId = self.client.getReqId()
             reqIds.append(reqId)
+
             future = self.wrapper.startReq(reqId, contract)
             futures.append(future)
-            ticker = self.wrapper.startTicker(reqId, contract, "snapshot")
-            tickers.append(ticker)
-            self.client.reqMktData(reqId, contract, "", True, regulatorySnapshot, [])
+
+            if snapshot:
+                ticker = self.wrapper.startTicker(reqId, contract, "snapshot")
+                tickers.append(ticker)
+            elif genericTickList:
+                ticker = self.wrapper.startTicker(reqId, contract, genericTickList)
+                tickers.append(ticker)
+            self.client.reqMktData(
+                reqId,
+                contract,
+                genericTickList,
+                snapshot,
+                regulatorySnapshot,
+                mktDataOptions,
+            )
 
         await asyncio.gather(*futures)
 
-        for ticker in tickers:
-            self.wrapper.endTicker(ticker, "snapshot")
+        if snapshot:
+            for ticker in tickers:
+                self.wrapper.endTicker(ticker, "snapshot")
+        elif genericTickList:
+            for ticker in tickers:
+                self.wrapper.endTicker(ticker, genericTickList)
 
         return tickers
 
